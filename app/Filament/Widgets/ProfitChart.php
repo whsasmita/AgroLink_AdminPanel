@@ -8,12 +8,12 @@ use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
 use Filament\Support\RawJs;
 
-class TransactionChart extends ChartWidget
+class ProfitChart extends ChartWidget
 {
-    protected ?string $heading = 'Transaction Overview';
+    protected ?string $heading = 'Net Profit Overview';
     protected ?string $pollingInterval = '30s';
 
-    protected static ?int $sort = 200;
+    protected static ?int $sort = 201;
 
     protected int|string|array $columnSpan = [
         'sm' => 2,
@@ -30,9 +30,20 @@ class TransactionChart extends ChartWidget
         $data = [];
 
         $dateColumn = Schema::hasColumn('transactions', 'transaction_date') ? 'transaction_date' : 'created_at';
-        $hasAmount = Schema::hasColumn('transactions', 'amount_paid');
-        $sumExpr = $hasAmount ? 'SUM(amount_paid)' : 'COUNT(*)';
-        $datasetLabel = $hasAmount ? 'Total Pembayaran' : 'Jumlah Transaksi';
+
+        // Profit formula pieces (MySQL):
+        // gross = amount_paid * 0.05 + 5000
+        // fee varies by payment_method
+        // net = gross - fee
+        $netExpr = "( (amount_paid * 0.05) + 5000 ) - (
+            CASE 
+                WHEN LOWER(payment_method) LIKE '%virtual account%' THEN 4000
+                WHEN LOWER(payment_method) LIKE '%qris%' THEN amount_paid * 0.007
+                WHEN LOWER(payment_method) LIKE '%gopay%' OR LOWER(payment_method) LIKE '%shopee%' THEN amount_paid * 0.02
+                WHEN LOWER(payment_method) LIKE '%dana%' THEN amount_paid * 0.015
+                ELSE 0
+            END
+        )";
 
         switch ($filter) {
             case 'weekly':
@@ -40,7 +51,7 @@ class TransactionChart extends ChartWidget
                 $start = $now->copy()->subWeeks(11)->startOfWeek();
 
                 $rows = Transaction::query()
-                    ->selectRaw("YEARWEEK({$dateColumn}, 3) as period, {$sumExpr} as total")
+                    ->selectRaw("YEARWEEK({$dateColumn}, 3) as period, SUM({$netExpr}) as total")
                     ->whereBetween($dateColumn, [$start, $end])
                     ->groupBy('period')
                     ->orderBy('period')
@@ -61,7 +72,7 @@ class TransactionChart extends ChartWidget
                 $start = $now->copy()->subMonthsNoOverflow(11)->startOfMonth();
 
                 $rows = Transaction::query()
-                    ->selectRaw("DATE_FORMAT({$dateColumn}, '%Y-%m') as period, {$sumExpr} as total")
+                    ->selectRaw("DATE_FORMAT({$dateColumn}, '%Y-%m') as period, SUM({$netExpr}) as total")
                     ->whereBetween($dateColumn, [$start, $end])
                     ->groupBy('period')
                     ->orderBy('period')
@@ -83,7 +94,7 @@ class TransactionChart extends ChartWidget
                 $start = $now->copy()->subDays(29)->startOfDay();
 
                 $rows = Transaction::query()
-                    ->selectRaw("DATE({$dateColumn}) as period, {$sumExpr} as total")
+                    ->selectRaw("DATE({$dateColumn}) as period, SUM({$netExpr}) as total")
                     ->whereBetween($dateColumn, [$start, $end])
                     ->groupBy('period')
                     ->orderBy('period')
@@ -104,10 +115,10 @@ class TransactionChart extends ChartWidget
             'labels' => $labels,
             'datasets' => [
                 [
-                    'label' => $datasetLabel,
+                    'label' => 'Net Profit',
                     'data' => $data,
-                    'borderColor' => '#10b981',
-                    'backgroundColor' => 'rgba(16, 185, 129, 0.15)',
+                    'borderColor' => '#3b82f6',
+                    'backgroundColor' => 'rgba(59, 130, 246, 0.15)',
                     'fill' => true,
                     'tension' => 0.4,
                     'pointRadius' => 0,
@@ -133,49 +144,6 @@ class TransactionChart extends ChartWidget
 
     protected function getOptions(): array | RawJs | null
     {
-        $hasAmount = Schema::hasColumn('transactions', 'amount_paid');
-
-        if ($hasAmount) {
-            return RawJs::make(<<<'JS'
-                ({
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: {
-                            mode: 'index',
-                            intersect: false,
-                            callbacks: {
-                                label: function(context) {
-                                    const val = context.parsed.y ?? 0;
-                                    const label = (context.dataset && context.dataset.label) ? context.dataset.label + ': ' : '';
-                                    const formatted = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val).replace('IDR', 'Rp');
-                                    return label + formatted;
-                                },
-                            },
-                        },
-                    },
-                    elements: {
-                        line: { borderJoinStyle: 'round', capBezierPoints: true },
-                        point: { hoverRadius: 4 },
-                    },
-                    scales: {
-                        x: {
-                            grid: { display: false },
-                            ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 },
-                        },
-                        y: {
-                            grid: { color: 'rgba(0,0,0,0.06)', drawBorder: false },
-                            ticks: {
-                                precision: 0,
-                                callback: function(value) {
-                                    return 'Rp ' + new Intl.NumberFormat('id-ID', { maximumFractionDigits: 0 }).format(value ?? 0);
-                                },
-                            },
-                        },
-                    },
-                })
-            JS);
-        }
-
         return RawJs::make(<<<'JS'
             ({
                 plugins: {
@@ -187,7 +155,8 @@ class TransactionChart extends ChartWidget
                             label: function(context) {
                                 const val = context.parsed.y ?? 0;
                                 const label = (context.dataset && context.dataset.label) ? context.dataset.label + ': ' : '';
-                                return label + (new Intl.NumberFormat('id-ID').format(val));
+                                const formatted = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val).replace('IDR', 'Rp');
+                                return label + formatted;
                             },
                         },
                     },
@@ -206,7 +175,7 @@ class TransactionChart extends ChartWidget
                         ticks: {
                             precision: 0,
                             callback: function(value) {
-                                return new Intl.NumberFormat('id-ID').format(value ?? 0);
+                                return 'Rp ' + new Intl.NumberFormat('id-ID', { maximumFractionDigits: 0 }).format(value ?? 0);
                             },
                         },
                     },
